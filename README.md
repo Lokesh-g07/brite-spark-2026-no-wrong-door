@@ -21,7 +21,7 @@ No database, Redis, Docker, or external infrastructure is needed.
 ### 1. Clone and enter the project
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/Lokesh-g07/brite-spark-2026-no-wrong-door.git
 cd brite
 ```
 

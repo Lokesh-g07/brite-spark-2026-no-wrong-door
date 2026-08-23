@@ -1,6 +1,6 @@
 # ARCHITECTURE.md — Brite Spark 2026 · Problem 3: "No Wrong Door"
 
-> **Status:** Implementation plan. No code written yet.
+> **Status:** Implemented & Verified Architecture.
 
 ---
 
@@ -26,13 +26,7 @@ enough that one person can build, test, and demonstrate it in two days.
 | **httpx** | Async HTTP client. Required to make concurrent, non-blocking calls to the upstream services. |
 | **uvicorn** | ASGI server to run FastAPI. |
 
-All three are installed via a single `pip install -r requirements.txt`.
-
-**Why not Flask?** Flask is synchronous by default. To call two slow upstream services concurrently we would need `threading`, `gevent`, or `asyncio` wrappers — adding complexity that FastAPI removes by being async-native.
-
-**Why not Python stdlib `http.server`?** It has no async support, no routing, and no request validation. The amount of boilerplate would exceed the amount of application code, and we would still need an HTTP client library.
-
-**Why not Node.js / Express?** Would work equally well, but the mock services are Python 3 and the judges will already have Python on the machine. Staying in one language reduces the setup steps in the README.
+All dependencies are installed via a single `pip install -r requirements.txt`.
 
 ---
 
@@ -40,56 +34,29 @@ All three are installed via a single `pip install -r requirements.txt`.
 
 | Method | Path | Description |
 |:--|:--|:--|
-| `GET` | `/residents` | All residents from both sources, deduplicated, with source status. |
-| `GET` | `/residents/{id}` | Single resident by REST id (`R-NNNNN`), with source status. |
-| `GET` | `/benefits` | All benefit records from the XML source, with source status. |
-| `GET` | `/benefits/{ref}` | Single benefit record by XML ref (`CC/YYYY/NNNN`), with source status. |
-| `GET` | `/health` | Aggregated health of this API and both upstream services. |
+| `GET` | `/search` | Unified search across Resident Index and Benefits Register, returning source-separated matches with complete source availability metadata. |
+| `GET` | `/health` | Liveness health probe for the unified API. |
 
-**Why these five endpoints?**
+**Why `GET /search`?**
 
-The problem says "one call, one resident, everything known about them." At the floor
-level (no identity matching), "everything known" from each source is independent. We
-expose both collections through one API so a staff member only needs one place to look.
-The single-record endpoints let a caller drill into a specific resident or benefit
-record. The health endpoint gives operational visibility.
-
-**Why separate `/residents` and `/benefits` instead of merging them into one list?**
-
-Without identity matching (stretch goal, not floor), we have no reliable way to merge a
-REST resident record with an XML benefit record. Presenting them as two clearly-labelled
-collections in one response is honest: the caller sees exactly what each source knows.
-A merged list would either require identity matching or would mix structurally different
-records into one array, which is worse than useless — it pretends a merge happened when
-it did not.
+The problem statement requires: *"One call, one resident, everything known about them."*
+Because the upstream systems do not share a foreign key (`_pid` is stripped by both services at startup), cross-system identity resolution is explicitly a stretch goal. To provide a genuine unified view without risking false-positive automated merges:
+- A staff member queries by a resident's real-world traits (`first_name`, `last_name`, `date_of_birth`).
+- The API concurrently fetches all records from both systems.
+- The API filters each dataset in memory and returns both match lists (`resident_index_matches` and `benefits_register_matches`) side-by-side in a single unified JSON envelope.
+- The staff member sees everything both systems know in one response, while retaining the authority to confirm identity.
 
 ---
 
 ### Request Parameters
 
-#### `GET /residents`
+#### `GET /search`
 
 | Param | Type | Default | Description |
 |:--|:--|:--|:--|
-| `page` | int | `1` | Page number (1-indexed). Applied to our deduplicated result set, not to upstream pages. |
-| `page_size` | int | `50` | Records per page. |
-
-We re-paginate our own deduplicated output. This decouples our API contract from the
-upstream REST service's hardcoded page size of 25 and its duplicate-producing pagination.
-
-#### `GET /residents/{id}`
-
-No query params. Path parameter `id` is the REST resident id (e.g. `R-10234`).
-
-#### `GET /benefits`
-
-No pagination. The XML source returns all 540 records in one call and is not paginated
-upstream, so we return the full set. If we later add caching, this remains a single response.
-
-#### `GET /benefits/{ref}`
-
-Path parameter `ref` is the XML benefit ref (e.g. `NO/2019/4234`). Slashes are part of the
-ref and must be URL-encoded in the path (`NO%2F2019%2F4234`).
+| `first_name` | string | `null` | Optional case-insensitive substring match on first name. |
+| `last_name` | string | `null` | Optional case-insensitive substring match on last name. |
+| `date_of_birth` | string | `null` | Optional exact match on date of birth (`YYYY-MM-DD`). |
 
 #### `GET /health`
 
@@ -99,48 +66,17 @@ No params.
 
 ### Response Structure
 
-Every response from this API follows a single envelope:
-
-```json
-{
-  "data": { ... },
-  "sources": {
-    "resident_index": {
-      "status": "ok | degraded | unavailable",
-      "records_fetched": 620,
-      "duplicates_removed": 41,
-      "error": null,
-      "attempts": 1
-    },
-    "benefits_register": {
-      "status": "ok | degraded | unavailable",
-      "records_fetched": 540,
-      "error": "Service returned HTTP 500 on 3/3 attempts",
-      "attempts": 3
-    }
-  }
-}
-```
-
-**Why this envelope?**
-
-Floor requirement 1 (graceful degradation) demands that when a source fails, the response
-must include "a clear indication of what is missing and why." The `sources` block satisfies
-this: every response tells the caller the state of each upstream source, including error
-details and retry counts. The caller never has to guess whether an empty result means "no
-records exist" or "the source was down."
-
-Floor requirement 2 (never silently pretend the missing source had nothing to say) is
-satisfied because the `status` field is always present and always reflects reality.
-
----
-
-#### `GET /residents` — response `data` shape
+Every response from this API follows a single standard envelope:
 
 ```json
 {
   "data": {
-    "residents": [
+    "query": {
+      "first_name": "Maria",
+      "last_name": "Delgado",
+      "date_of_birth": "1971-04-02"
+    },
+    "resident_index_matches": [
       {
         "id": "R-10234",
         "first_name": "Maria",
@@ -153,35 +89,7 @@ satisfied because the `status` field is always present and always reflects reali
         "last_contact": "2025-11-30"
       }
     ],
-    "page": 1,
-    "page_size": 50,
-    "total": 620,
-    "has_more": true
-  },
-  "sources": { ... }
-}
-```
-
-#### `GET /residents/{id}` — response `data` shape
-
-```json
-{
-  "data": {
-    "resident": { ... }
-  },
-  "sources": { ... }
-}
-```
-
-Returns HTTP 404 with `"data": null` and `sources` status if the id is not found in the
-Resident Index.
-
-#### `GET /benefits` — response `data` shape
-
-```json
-{
-  "data": {
-    "benefits": [
+    "benefits_register_matches": [
       {
         "ref": "NO/2019/4234",
         "name": "DELGADO, Maria",
@@ -191,56 +99,53 @@ Resident Index.
         "benefit_code": "HSP-B",
         "review_due": "2026-05-14"
       }
-    ],
-    "total": 540
-  },
-  "sources": { ... }
-}
-```
-
-When the Benefits Register is unavailable after retries:
-```json
-{
-  "data": {
-    "benefits": [],
-    "total": 0
+    ]
   },
   "sources": {
+    "resident_index": {
+      "status": "ok",
+      "records_fetched": 661,
+      "duplicates_removed": 41,
+      "error": null,
+      "attempts": 1
+    },
     "benefits_register": {
-      "status": "unavailable",
-      "records_fetched": 0,
-      "error": "HTTP 500 on all 3 attempts",
-      "attempts": 3
+      "status": "ok",
+      "records_fetched": 540,
+      "duplicates_removed": null,
+      "error": null,
+      "attempts": 1
     }
   }
 }
 ```
 
-#### `GET /benefits/{ref}` — response `data` shape
-
+When Benefits Register fails after exhausting all 3 attempts:
 ```json
 {
   "data": {
-    "benefit": { ... }
+    "query": { "first_name": null, "last_name": "Delgado", "date_of_birth": null },
+    "resident_index_matches": [ { ... } ],
+    "benefits_register_matches": []
   },
-  "sources": { ... }
-}
-```
-
-#### `GET /health` — response shape
-
-```json
-{
-  "status": "healthy | degraded | unhealthy",
-  "upstreams": {
-    "resident_index": { "reachable": true, "latency_ms": 4 },
-    "benefits_register": { "reachable": true, "latency_ms": 2 }
+  "sources": {
+    "resident_index": {
+      "status": "ok",
+      "records_fetched": 661,
+      "duplicates_removed": 41,
+      "error": null,
+      "attempts": 1
+    },
+    "benefits_register": {
+      "status": "unavailable",
+      "records_fetched": 0,
+      "duplicates_removed": null,
+      "error": "HTTP 500: Register temporarily unavailable. Retry.",
+      "attempts": 3
+    }
   }
 }
 ```
-
-Calls each upstream's `/health` endpoint. Since the XML `/health` is exempt from delay
-and failure, this always gives a true liveness signal.
 
 ---
 
