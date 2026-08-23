@@ -31,3 +31,13 @@ REST_TIMEOUT: float = float(os.environ.get("REST_TIMEOUT", "10.0"))     # second
 # Our API pagination defaults
 # ---------------------------------------------------------------------------
 DEFAULT_PAGE_SIZE: int = int(os.environ.get("DEFAULT_PAGE_SIZE", "50"))
+
+# ---------------------------------------------------------------------------
+# Circuit Breaker — Benefits Register
+# ---------------------------------------------------------------------------
+# Opens after this many consecutive adapter-level failures (each failure
+# means all XML_MAX_ATTEMPTS retry attempts were exhausted).
+CB_FAILURE_THRESHOLD: int = int(os.environ.get("CB_FAILURE_THRESHOLD", "3"))
+# Seconds to stay OPEN before allowing a HALF_OPEN trial request.
+CB_RECOVERY_DURATION: float = float(os.environ.get("CB_RECOVERY_DURATION", "30.0"))
+

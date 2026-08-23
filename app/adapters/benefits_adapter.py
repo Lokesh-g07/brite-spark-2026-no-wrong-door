@@ -44,12 +44,26 @@ def parse_benefits_xml(xml_string: str) -> List[BenefitRecord]:
 
 async def fetch_all_benefits() -> Tuple[List[BenefitRecord], SourceStatus]:
     """
-    Fetch all benefits from the XML service. 
+    Fetch all benefits from the XML service.
     Implements 3 total attempts with linear backoff.
+    Circuit breaker prevents repeated calls to a persistently failing service.
     """
+    from app.circuit_breaker import benefits_circuit
+
+    # Circuit breaker check: if OPEN, fail fast
+    if not benefits_circuit.should_allow_request():
+        remaining = benefits_circuit.time_remaining_open()
+        return [], SourceStatus(
+            status="unavailable",
+            records_fetched=0,
+            error=f"Circuit breaker OPEN (recovery in {remaining:.0f}s)",
+            attempts=0
+        )
+
+    # Normal retry loop (unchanged)
     attempt = 0
     last_error = ""
-    
+
     async with httpx.AsyncClient(timeout=XML_TIMEOUT) as client:
         while attempt < XML_MAX_ATTEMPTS:
             attempt += 1
@@ -58,6 +72,7 @@ async def fetch_all_benefits() -> Tuple[List[BenefitRecord], SourceStatus]:
                 if resp.status_code == 200:
                     try:
                         records = parse_benefits_xml(resp.text)
+                        benefits_circuit.record_success()
                         return records, SourceStatus(
                             status="ok",
                             records_fetched=len(records),
@@ -71,10 +86,12 @@ async def fetch_all_benefits() -> Tuple[List[BenefitRecord], SourceStatus]:
                     last_error = f"HTTP {resp.status_code}"
             except httpx.RequestError as e:
                 last_error = f"Connection/Timeout error: {str(e)}"
-                
+
             if attempt < XML_MAX_ATTEMPTS:
                 await asyncio.sleep(XML_BACKOFF_BASE * attempt)
-                
+
+    # All retries exhausted — record failure for circuit breaker
+    benefits_circuit.record_failure()
     return [], SourceStatus(
         status="unavailable",
         records_fetched=0,
