@@ -633,9 +633,9 @@ The Day-2 README says "Your demo still has to work." It does, because:
 |:--|:--|:--|
 | Identity matching across sources | Stretch goal | Explicitly called a "rabbit hole" by the problem. Requires fuzzy matching on name, DOB, address. High risk of false positives. |
 | In-memory caching of XML records | Stretch goal | Reduces latency and failure impact. Needs a defensible expiry policy. |
-| Circuit breaker for XML service | Post-testing evaluation | Not implemented in the initial MVP. After the floor is complete and tested under the Day-2 40% failure rate, evaluate whether a circuit breaker provides meaningful benefit. If testing shows that the bounded retry strategy handles 40% failure adequately, a circuit breaker adds complexity without clear value. If testing reveals that sustained failures cause unacceptable latency across many requests, a circuit breaker (using `/health` to probe recovery) becomes worthwhile. |
+| Circuit breaker for XML service | Implemented | Protects the system against sustained upstream failures. Implemented with OPEN, HALF_OPEN, and CLOSED states. Fails fast during persistent outages to avoid blocking requests. |
 | Re-pagination of REST results | Nice-to-have | Expose configurable page_size on our API. Low priority. |
-| Request logging / metrics | Operational | Useful for demo but not a floor requirement. |
+| Production Logging & Validation | Implemented | Application-level logging captures circuit transitions, retries, and errors. Configuration validation ensures fast-failure for invalid ENV values. |
 
 ---
 
@@ -849,10 +849,11 @@ system falls back to graceful degradation: a partial response with explicit sour
 information. If testing at 40% shows the current attempt budget is insufficient, increasing
 `XML_MAX_ATTEMPTS` in `config.py` is a one-line change.
 
-Identity matching and caching are deferred as stretch goals. A circuit breaker is not
-implemented in the initial MVP but will be evaluated after testing the system under the
-Day-2 40% failure rate — it is only worthwhile if testing shows that sustained failures
-cause unacceptable latency across many requests. The adapter/orchestrator separation means
-any of these can be added later without structural changes. That is the same property that
-makes the Day-2 change survivable: each source's behaviour can change without the rest of
-the system caring.
+Identity matching and caching remain intentionally deferred as stretch goals because the dataset cannot guarantee safe cross-system identity resolution without unacceptable false-positive risk.
+
+However, the architecture has been fully hardened for production:
+- A singleton **Circuit Breaker** protects the Benefits Register, preventing blocking delays during sustained outages.
+- **Structured logging** provides deep observability into retry loops, circuit state transitions, and orchestrator health.
+- **Configuration validation** ensures invalid timeouts or thresholds prevent startup entirely.
+
+The adapter/orchestrator separation ensured that these resilience and observability features were added without altering the core aggregation logic. This is the same property that makes the Day-2 change survivable: each source's behaviour can change without the rest of the system caring.

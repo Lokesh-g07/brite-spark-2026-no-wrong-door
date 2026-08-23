@@ -16,19 +16,23 @@ This document summarizes the key architectural decisions, degradation policies, 
 
 ## 4. Retry Policy (Bounded Linear Backoff)
 **Decision:** The Benefits Register XML adapter implements a maximum of 3 total attempts (1 initial + 2 retries) with a linear backoff (`0.3s * attempt`).
-**Trade-off:** Exponential backoff would increase latency beyond reasonable limits for an already slow service (0.7–2.4s base latency). Linear backoff limits the worst-case time to ~8 seconds, offering a strong theoretical recovery rate (93.6% for independent 40% failures) without stalling the user. Real-world persistent failures exhaust retries and gracefully degrade.
+**Trade-off:** Exponential backoff would increase latency beyond reasonable limits for an already slow service (0.7–2.4s base latency). Linear backoff limits the worst-case time to ~8 seconds, offering a strong theoretical recovery rate (93.6% for independent 40% failures) without stalling the user. Real-world persistent failures exhaust retries and gracefully degrade, triggering a failure record in the Circuit Breaker.
 
-## 5. Deduplication and Idempotency
+## 5. Circuit Breaker (Protection Against Sustained Failure)
+**Decision:** A singleton in-memory Circuit Breaker protects the Benefits Register. It transitions to `OPEN` after a configured threshold of consecutive exhausted retries, failing fast without making upstream HTTP calls. After a recovery duration, it enters `HALF_OPEN` to permit a single trial request.
+**Trade-off:** Retries handle transient failures, but a circuit breaker prevents the API from stalling during a persistent outage. By failing fast, the API remains highly responsive for Resident Index queries even when the Benefits Register is completely down. The state is intentionally in-memory and resets on application restart for simplicity, avoiding external dependencies like Redis.
+
+## 6. Deduplication and Idempotency
 **Decision:** Deduplication of Resident Index records occurs during pagination in `resident_adapter.py` by maintaining a `seen_ids: set[str]`. Duplicates are omitted from output and tracked in `duplicates_removed`. Because all endpoints are read-only HTTP `GET` requests returning deterministic slices of static data, the API is inherently idempotent and retry-safe.
 **Trade-off:** Deduplicating in the adapter keeps upstream pagination quirks localized, preventing downstream contamination.
 
-## 6. Explicit Source Status Envelope
+## 7. Explicit Source Status Envelope
 **Decision:** Every API response wraps data inside a standard envelope containing a `sources` dictionary detailing the status of every upstream dependency (`resident_index` and `benefits_register`).
 **Trade-off:** Adds minimal envelope overhead in exchange for eliminating ambiguity: callers can unequivocally distinguish between "no records match query" vs "source was down".
 
 ---
 
-## 7. Explicit Degradation Policy Matrix
+## 8. Explicit Degradation Policy Matrix
 
 The table below documents the exact system behavior for every possible upstream condition.
 
@@ -43,6 +47,7 @@ The table below documents the exact system behavior for every possible upstream 
 | **Benefits Register Timeout (Recovers on Retry)** | Yes (attempt 2 or 3) | Intact Resident matches + matching Benefits records | Dependent on Resident source | `status: "ok"`, `records_fetched: 540`, `attempts: 2` or `3`, `error: null` | Source status is `"ok"`. `attempts` reflects retry count (>1). |
 | **Benefits Register Connection Failure (Recovers)** | Yes (attempt 2 or 3) | Intact Resident matches + matching Benefits records | Dependent on Resident source | `status: "ok"`, `records_fetched: 540`, `attempts: 2` or `3`, `error: null` | Source status is `"ok"`. `attempts` reflects retry count (>1). |
 | **Benefits Register Retry Exhaustion (All 3 Fail)** | Yes (3 total attempts) | Intact Resident matches + `benefits_register_matches: []` | Dependent on Resident source | `status: "unavailable"`, `records_fetched: 0`, `attempts: 3`, `error: "<last attempt error>"` | `status: "unavailable"`, `attempts: 3`, `error` describes the persistent failure reason. |
+| **Benefits Register Circuit Breaker OPEN** | No (Fails fast) | Intact Resident matches + `benefits_register_matches: []` | Dependent on Resident source | `status: "unavailable"`, `records_fetched: 0`, `attempts: 0`, `error: "Circuit breaker OPEN..."` | `status: "unavailable"`, `attempts: 0`, explicit circuit breaker error message. |
 | **Both Sources Fail** | Yes (1 REST attempt, 3 XML attempts) | `resident_index_matches: []`, `benefits_register_matches: []` (HTTP 200 response) | `status: "unavailable"`, `records_fetched: 0`, `error: "<rest error>"` | `status: "unavailable"`, `records_fetched: 0`, `attempts: 3`, `error: "<xml error>"` | Both statuses report `"unavailable"`; response envelope returns clean HTTP 200 with complete error logs for both sources. |
 
 ### Degradation Guarantees
