@@ -161,8 +161,10 @@ python services/xml_service.py --port 8082 --failure-rate 0.40
 ```
 
 The unified API handles this automatically:
-- Bounded linear retries (up to 3 total attempts) recover from intermittent failures.
+- **Bounded linear retries** (up to 3 total attempts) recover from intermittent failures.
+- A singleton **Circuit Breaker** protects the API from stalling during sustained outages.
 - If all 3 attempts fail, the API gracefully degrades, returning resident data and explicit failure status without crashing.
+- **Production logging** surfaces exact failure points and circuit state transitions.
 
 ---
 
@@ -178,6 +180,9 @@ All settings can be overridden via environment variables:
 | `XML_TIMEOUT` | `5.0` | Seconds per XML attempt |
 | `XML_BACKOFF_BASE` | `0.3` | Backoff multiplier between XML retries (`0.3s * attempt`) |
 | `REST_TIMEOUT` | `10.0` | Seconds for REST calls |
+| `CB_FAILURE_THRESHOLD` | `3` | Consecutive failures before the circuit opens |
+| `CB_RECOVERY_DURATION` | `30.0` | Seconds the circuit stays OPEN before allowing a HALF_OPEN trial |
+| `DEFAULT_PAGE_SIZE` | `50` | Default page size for API endpoints |
 
 ---
 
@@ -202,15 +207,16 @@ brite/
 │
 ├── app/                   # Application code
 │   ├── __init__.py
-│   ├── main.py            # FastAPI application factory
-│   ├── config.py          # Centralised configuration
+│   ├── main.py            # FastAPI app + structured logging
+│   ├── config.py          # Centralised config + startup validation
+│   ├── circuit_breaker.py # Singleton in-memory circuit breaker
 │   ├── api/
 │   │   ├── __init__.py
 │   │   └── routes.py      # /search and /health API endpoints
 │   ├── adapters/
 │   │   ├── __init__.py
 │   │   ├── resident_adapter.py   # REST pagination & deduplication
-│   │   └── benefits_adapter.py   # XML parsing, bounded retries & backoff
+│   │   └── benefits_adapter.py   # XML parsing, retries & circuit integration
 │   ├── models/
 │   │   ├── __init__.py
 │   │   └── models.py      # Pydantic schemas & response envelopes
@@ -220,6 +226,8 @@ brite/
 │
 └── tests/
     ├── __init__.py
-    ├── test_health.py     # Health endpoint verification
-    └── test_orchestrator.py # Parsing, degradation, retry, dedup & search tests
+    ├── test_health.py           # Health endpoint verification
+    ├── test_orchestrator.py     # Parsing, degradation, retry, dedup & search tests
+    ├── test_circuit_breaker.py  # Unit and integration tests for state transitions
+    └── test_config.py           # Configuration validation tests
 ```
