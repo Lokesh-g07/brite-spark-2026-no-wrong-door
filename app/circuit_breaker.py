@@ -16,6 +16,9 @@ a hackathon demo. State is lost on restart (which is fine — the circuit
 resets to CLOSED, which is the safe default).
 """
 import time
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class BenefitsCircuitBreaker:
@@ -51,6 +54,7 @@ class BenefitsCircuitBreaker:
             elapsed = time.monotonic() - self._opened_at
             if elapsed >= self.recovery_duration:
                 self._state = self.HALF_OPEN
+                logger.info("CIRCUIT BREAKER: Transited to HALF_OPEN (Trial request allowed).")
         return self._state
 
     def should_allow_request(self) -> bool:
@@ -65,6 +69,8 @@ class BenefitsCircuitBreaker:
 
     def record_success(self) -> None:
         """Record a successful adapter response (status="ok")."""
+        if self._state != self.CLOSED:
+            logger.info("CIRCUIT BREAKER: Transited to CLOSED (Upstream recovered).")
         self._consecutive_failures = 0
         self._state = self.CLOSED
 
@@ -72,9 +78,11 @@ class BenefitsCircuitBreaker:
         """Record a failed adapter response (status="unavailable"
         after all retries exhausted)."""
         self._consecutive_failures += 1
-        if self._consecutive_failures >= self.failure_threshold:
+        logger.warning(f"CIRCUIT BREAKER: Recorded exhausted failure {self._consecutive_failures}/{self.failure_threshold}")
+        if self._consecutive_failures >= self.failure_threshold and self._state != self.OPEN:
             self._state = self.OPEN
             self._opened_at = time.monotonic()
+            logger.error("CIRCUIT BREAKER: Transited to OPEN (Upstream unavailable).")
 
     def time_remaining_open(self) -> float:
         """Seconds remaining in OPEN state. 0 if not OPEN."""

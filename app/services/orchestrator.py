@@ -4,6 +4,7 @@ Calls upstream adapters concurrently, assembles the unified response,
 and handles failure isolation and filtering.
 """
 import asyncio
+import logging
 from typing import Tuple, Any, Optional
 
 from app.adapters import resident_adapter, benefits_adapter
@@ -12,6 +13,7 @@ from app.models.models import (
     UnifiedSearchData, UnifiedSearchResponse, SearchQuery
 )
 
+logger = logging.getLogger(__name__)
 
 def unpack_or_fail(result: Any, source_name: str) -> Tuple[Any, SourceStatus]:
     """
@@ -19,6 +21,7 @@ def unpack_or_fail(result: Any, source_name: str) -> Tuple[Any, SourceStatus]:
     If the result is an Exception, returns empty data and an unavailable SourceStatus.
     """
     if isinstance(result, Exception):
+        logger.error(f"Unexpected internal error from {source_name}: {result}", exc_info=result)
         return [], SourceStatus(
             status="unavailable",
             records_fetched=0,

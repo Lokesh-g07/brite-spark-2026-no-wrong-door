@@ -3,6 +3,7 @@ Benefits Register adapter.
 Handles XML parsing, retries with linear backoff, and timeouts.
 """
 import asyncio
+import logging
 import httpx
 import xml.etree.ElementTree as ET
 from urllib.parse import quote
@@ -10,6 +11,8 @@ from typing import List, Tuple
 
 from app.config import XML_BASE_URL, XML_MAX_ATTEMPTS, XML_TIMEOUT, XML_BACKOFF_BASE
 from app.models.models import BenefitRecord, SourceStatus
+
+logger = logging.getLogger(__name__)
 
 
 def parse_benefits_xml(xml_string: str) -> List[BenefitRecord]:
@@ -88,9 +91,11 @@ async def fetch_all_benefits() -> Tuple[List[BenefitRecord], SourceStatus]:
                 last_error = f"Connection/Timeout error: {str(e)}"
 
             if attempt < XML_MAX_ATTEMPTS:
+                logger.warning(f"Benefits Register attempt {attempt} failed: {last_error}. Retrying...")
                 await asyncio.sleep(XML_BACKOFF_BASE * attempt)
 
     # All retries exhausted — record failure for circuit breaker
+    logger.error(f"Benefits Register exhausted all {attempt} attempts. Last error: {last_error}")
     benefits_circuit.record_failure()
     return [], SourceStatus(
         status="unavailable",
@@ -137,8 +142,10 @@ async def fetch_benefit(ref: str) -> Tuple[BenefitRecord | None, SourceStatus]:
                 last_error = f"Connection/Timeout error: {str(e)}"
                 
             if attempt < XML_MAX_ATTEMPTS:
+                logger.warning(f"Benefits Register attempt {attempt} failed: {last_error}. Retrying...")
                 await asyncio.sleep(XML_BACKOFF_BASE * attempt)
                 
+    logger.error(f"Benefits Register exhausted all {attempt} attempts. Last error: {last_error}")
     return None, SourceStatus(
         status="unavailable",
         records_fetched=0,

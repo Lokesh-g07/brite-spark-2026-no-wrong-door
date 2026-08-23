@@ -40,4 +40,23 @@ DEFAULT_PAGE_SIZE: int = int(os.environ.get("DEFAULT_PAGE_SIZE", "50"))
 CB_FAILURE_THRESHOLD: int = int(os.environ.get("CB_FAILURE_THRESHOLD", "3"))
 # Seconds to stay OPEN before allowing a HALF_OPEN trial request.
 CB_RECOVERY_DURATION: float = float(os.environ.get("CB_RECOVERY_DURATION", "30.0"))
+# ---------------------------------------------------------------------------
+# Configuration Validation
+# ---------------------------------------------------------------------------
+def _validate_config():
+    if XML_MAX_ATTEMPTS < 1:
+        raise ValueError("Configuration error: XML_MAX_ATTEMPTS must be >= 1")
+    if XML_TIMEOUT <= 0:
+        raise ValueError("Configuration error: XML_TIMEOUT must be > 0")
+    if XML_BACKOFF_BASE < 0:
+        raise ValueError("Configuration error: XML_BACKOFF_BASE must be >= 0")
+    if REST_TIMEOUT <= 0:
+        raise ValueError("Configuration error: REST_TIMEOUT must be > 0")
+    if CB_FAILURE_THRESHOLD < 1:
+        raise ValueError("Configuration error: CB_FAILURE_THRESHOLD must be >= 1")
+    if CB_RECOVERY_DURATION <= 0:
+        raise ValueError("Configuration error: CB_RECOVERY_DURATION must be > 0")
+    if DEFAULT_PAGE_SIZE < 1:
+        raise ValueError("Configuration error: DEFAULT_PAGE_SIZE must be >= 1")
 
+_validate_config()
