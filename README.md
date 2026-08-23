@@ -14,6 +14,42 @@ and **Benefits Register** (XML) into one unified view.
 
 No database, Redis, Docker, or external infrastructure is needed.
 
+## Tech Stack
+
+- **Framework:** FastAPI (Native async support and OpenAPI docs)
+- **HTTP Client:** HTTPX (Non-blocking concurrent requests)
+- **Data Validation:** Pydantic (Type-safe response envelopes)
+- **Server:** Uvicorn (ASGI web server)
+- **Testing:** Pytest & Pytest-Asyncio
+
+---
+
+## Functional Capabilities
+
+**Core Endpoints & Processing**
+- **Unified `GET /search` Endpoint:** Aggregates both data sources concurrently.
+- **Liveness `/health` Endpoint:** Returns orchestrator health status.
+- **Idempotent Operations:** Strictly read-only GET behaviour.
+- **Resident Index Pagination:** Traverses all pages automatically.
+- **In-Memory Deduplication:** Safely filters the 661 raw fetched records down to 620 unique residents by removing 41 duplicates.
+- **Benefits Register XML Parsing:** Correctly handles legacy PascalCase XML schemas.
+
+**Resilience & Isolation**
+- **Independent Source Failure Isolation:** `asyncio.gather(return_exceptions=True)` ensures one failing source never crashes the other.
+- **Graceful Degradation:** A source failure returns intact data from the healthy source alongside explicit `unavailable` status metadata.
+- **Bounded Linear Backoff:** Transient XML errors trigger retries with linear backoff.
+- **Strict Attempt Budgets:** Exactly 3 TOTAL XML attempts (1 initial + 2 retries) before declaring the service unavailable.
+- **Timeouts:** Both REST and XML sources have configurable HTTP timeouts.
+
+**Sustained Outage Protection (Circuit Breaker)**
+- **Singleton Circuit Breaker:** Protects against total XML outages without stalling the API.
+- **State Machine:** Implements `CLOSED` (normal), `OPEN` (fail-fast), and `HALF_OPEN` (testing) states.
+- **Recovery Period:** Configurable duration before allowing a trial request.
+
+**Observability & Safety**
+- **Production Application Logging:** Emits structured logs for circuit transitions, exhausted retries, and errors.
+- **Configuration Validation:** Validates all environment variables on startup (preventing negative timeouts or invalid retries).
+
 ---
 
 ## Quick Start
@@ -154,17 +190,28 @@ python -m pytest tests/ -v
 
 ## Day-2 Change (40% XML Failure Rate)
 
-Restart the Benefits Register with the increased failure rate:
+**Day 1:** Normal upstream operation with occasional latency.
+**Day 2:** The Benefits Register permanently operates at an approximately 40% failure rate.
 
+Restart the Benefits Register with the increased failure rate to test this:
 ```bash
 python services/xml_service.py --port 8082 --failure-rate 0.40
 ```
 
-The unified API handles this automatically:
-- **Bounded linear retries** (up to 3 total attempts) recover from intermittent failures.
-- A singleton **Circuit Breaker** protects the API from stalling during sustained outages.
-- If all 3 attempts fail, the API gracefully degrades, returning resident data and explicit failure status without crashing.
-- **Production logging** surfaces exact failure points and circuit state transitions.
+The unified API is architected to handle this automatically without crashing or stalling. Here is exactly how the system responds:
+
+1. A single request reaches both upstream sources concurrently.
+2. A transient Benefits Register failure triggers bounded retries (up to 3 total attempts) with linear backoff.
+3. A successful retry recovers normally and seamlessly returns all data.
+4. Exhausted failures gracefully produce an explicit `unavailable` status in the response metadata.
+5. Resident Index data is fully isolated and is still returned even if the XML service fails completely.
+6. Repeated sustained Benefits Register failures eventually open the Circuit Breaker.
+7. An OPEN circuit fails fast instead of repeatedly hitting the failing service, protecting the caller from stalling.
+8. After the recovery duration (`CB_RECOVERY_DURATION`), a HALF_OPEN state permits exactly one trial request.
+9. A successful trial instantly closes the circuit and resumes normal operations.
+10. A failed trial immediately returns the circuit to OPEN.
+
+**Production logging** surfaces all exact failure points and circuit state transitions for observability.
 
 ---
 
