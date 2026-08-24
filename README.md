@@ -7,48 +7,101 @@ and **Benefits Register** (XML) into one unified view.
 
 ---
 
-## Prerequisites
+## Table of Contents
 
-- **Python 3.10+** (3.11, 3.12, 3.13, or 3.14)
-- **pip** (ships with Python)
+1. [Problem Statement](#problem-statement)
+2. [Solution Overview](#solution-overview)
+3. [Functional Capabilities](#functional-capabilities)
+4. [System Architecture](#system-architecture)
+5. [Technical Stack](#technical-stack)
+6. [Quick Start](#quick-start)
+7. [CLI Commands Reference](#cli-commands-reference)
+8. [Failure & Edge Case Handling](#failure--edge-case-handling)
+9. [Day-2 Challenge](#day-2-challenge)
+10. [API Response Examples](#api-response-examples)
+11. [Test Suite](#test-suite)
+12. [Configuration](#configuration)
+13. [Project Structure](#project-structure)
 
-No database, Redis, Docker, or external infrastructure is needed.
+---
 
-## Tech Stack
+## Problem Statement
 
-- **Framework:** FastAPI (Native async support and OpenAPI docs)
-- **HTTP Client:** HTTPX (Non-blocking concurrent requests)
-- **Data Validation:** Pydantic (Type-safe response envelopes)
-- **Server:** Uvicorn (ASGI web server)
-- **Testing:** Pytest & Pytest-Asyncio
+The Brite Spark 2026 Problem 3 ("No Wrong Door") challenges participants to build a resilient integration layer over two fundamentally heterogeneous government datasets:
+- **Resident Index**: A paginated REST/JSON service.
+- **Benefits Register**: A legacy XML service.
+
+The primary engineering challenge is to construct a single, unified search API that reliably aggregates records across both systems. Crucially, the system must survive a **Day-2 requirement** where the Benefits Register permanently degrades to an approximately 40% failure rate, without allowing the failing upstream dependency to compromise the availability of the overall integration.
+
+---
+
+## Solution Overview
+
+We engineered an asynchronous, fault-isolated FastAPI orchestrator. 
+
+When a user performs a search, the API concurrently dispatches requests to both upstream services. 
+- The REST adapter handles automated pagination and deterministic deduplication. 
+- The XML adapter implements bounded retries and linear backoff to invisibly absorb transient failures.
+- A centralized Circuit Breaker protects the system from stalling during sustained XML outages.
+
+If a source fails completely, the API intercepts the exception, preserves failure isolation, and returns a graceful degradation envelope containing the intact data from the healthy source alongside explicit `unavailable` status metadata.
 
 ---
 
 ## Functional Capabilities
 
-**Core Endpoints & Processing**
-- **Unified `GET /search` Endpoint:** Aggregates both data sources concurrently.
-- **Liveness `/health` Endpoint:** Returns orchestrator health status.
-- **Idempotent Operations:** Strictly read-only GET behaviour.
-- **Resident Index Pagination:** Traverses all pages automatically.
-- **In-Memory Deduplication:** Safely filters the 661 raw fetched records down to 620 unique residents by removing 41 duplicates.
-- **Benefits Register XML Parsing:** Correctly handles legacy PascalCase XML schemas.
+| Capability | Implementation / Behaviour |
+|:--|:--|
+| **Unified resident search** | A single `GET /search` endpoint aggregates both data sources concurrently. |
+| **REST pagination** | Automatically traverses all available pages from the Resident Index. |
+| **Resident deduplication** | Safely filters 661 raw fetched REST records down to exactly 620 unique residents in-memory. |
+| **XML parsing** | Correctly parses legacy PascalCase XML into standardized Pydantic models. |
+| **Concurrent upstream calls** | Uses `asyncio.gather(return_exceptions=True)` to prevent one dead source from crashing the other. |
+| **Bounded retries** | Exactly 3 total attempts for the Benefits Register per request. |
+| **Linear backoff** | Multiplier-based backoff (`0.3s * attempt`) between retries to avoid overwhelming struggling services. |
+| **Graceful degradation** | Returns intact data from the healthy source instead of a bare HTTP 500 when the other fails. |
+| **Circuit breaker** | An in-memory state machine (`CLOSED` → `OPEN` → `HALF_OPEN`) fails-fast during sustained outages. |
+| **Application logging** | Emits structured standard logs detailing retries, circuit transitions, and HTTP timeouts. |
+| **Configuration validation** | Validates `app/config.py` environment variables at startup to prevent invalid timeouts/thresholds. |
+| **Stable API response envelope** | Every response consistently separates `resident_index_matches` and `benefits_register_matches` alongside an explicit `sources` metadata block. |
 
-**Resilience & Isolation**
-- **Independent Source Failure Isolation:** `asyncio.gather(return_exceptions=True)` ensures one failing source never crashes the other.
-- **Graceful Degradation:** A source failure returns intact data from the healthy source alongside explicit `unavailable` status metadata.
-- **Bounded Linear Backoff:** Transient XML errors trigger retries with linear backoff.
-- **Strict Attempt Budgets:** Exactly 3 TOTAL XML attempts (1 initial + 2 retries) before declaring the service unavailable.
-- **Timeouts:** Both REST and XML sources have configurable HTTP timeouts.
+---
 
-**Sustained Outage Protection (Circuit Breaker)**
-- **Singleton Circuit Breaker:** Protects against total XML outages without stalling the API.
-- **State Machine:** Implements `CLOSED` (normal), `OPEN` (fail-fast), and `HALF_OPEN` (testing) states.
-- **Recovery Period:** Configurable duration before allowing a trial request.
+## System Architecture
 
-**Observability & Safety**
-- **Production Application Logging:** Emits structured logs for circuit transitions, exhausted retries, and errors.
-- **Configuration Validation:** Validates all environment variables on startup (preventing negative timeouts or invalid retries).
+```mermaid
+graph TD
+    Client[Client] -->|GET /search| API[FastAPI Application]
+    API --> Orchestrator[Async Orchestrator]
+    
+    Orchestrator -->|Concurrent Task 1| RestAdapter[Resident Adapter]
+    RestAdapter -->|Pagination & Dedup| RestMock[Resident Index<br/>REST/JSON]
+    
+    Orchestrator -->|Concurrent Task 2| CircuitBreaker[Circuit Breaker]
+    CircuitBreaker -->|If CLOSED / Retries| XmlAdapter[Benefits Adapter]
+    XmlAdapter -->|Parse PascalCase| XmlMock[Benefits Register<br/>XML]
+    
+    RestAdapter -->|Success or Exception| Orchestrator
+    XmlAdapter -->|Success or Exception| Orchestrator
+    
+    Orchestrator -->|Assemble Envelope| Response[Unified JSON Response]
+```
+
+---
+
+## Technical Stack
+
+| Technology | Purpose |
+|:--|:--|
+| **Python 3.10+** | Core runtime environment. |
+| **FastAPI** | High-performance API framework with native async support. |
+| **Pydantic** | Strict data validation and schema serialization. |
+| **httpx** | Async-native, non-blocking HTTP client for concurrent requests. |
+| **asyncio** | Core standard-library concurrency mechanism. |
+| **Uvicorn** | ASGI production web server. |
+| **pytest & pytest-asyncio** | Automated test suite execution. |
+| **Python standard logging** | Production-grade structured observability. |
+| **Environment variables** | Configuration management (`os` module). |
 
 ---
 
@@ -121,7 +174,69 @@ Search for a resident across both systems with a single call:
 curl "http://127.0.0.1:8000/search?last_name=Delgado"
 ```
 
-Example response:
+Interactive OpenAPI documentation is available at: http://127.0.0.1:8000/docs
+
+---
+
+## CLI Commands Reference
+
+| Command | Purpose |
+|:--|:--|
+| `python -m venv .venv` | Create virtual environment |
+| `.\.venv\Scripts\activate` | Activate virtual environment (Windows) |
+| `pip install -r requirements.txt` | Install dependencies |
+| `python -m uvicorn app.main:app --host 127.0.0.1 --port 8000` | Start FastAPI application (Terminal 1) |
+| `python services/rest_service.py --port 8081` | Start Resident Index mock service (Terminal 2) |
+| `python services/xml_service.py --port 8082` | Start Benefits Register mock service (Terminal 3) |
+| `python services/xml_service.py --port 8082 --failure-rate 0.40` | Start Benefits Register with **Day-2 40% failure rate** |
+| `curl http://127.0.0.1:8000/health` | Test Liveness health endpoint |
+| `curl "http://127.0.0.1:8000/search?last_name=Delgado"` | Test Unified Resident Search |
+| `python -m pytest tests/ -v` | Run full 23-test suite |
+| `python -m pytest tests/test_circuit_breaker.py -v` | Run specific circuit breaker tests |
+
+---
+
+## Failure & Edge Case Handling
+
+The API guarantees **graceful degradation** instead of returning bare HTTP 500s. 
+
+| Scenario | Actual System Behaviour |
+|:--|:--|
+| **Resident Index unavailable** | API returns HTTP 200 containing intact Benefits data. `sources.resident_index` reports `status: "unavailable"` and the exact connection/HTTP error. |
+| **Benefits Register transient failure** | Caught by bounded linear backoff. API retries invisibly. `attempts` in the response envelope will reflect the retry count (>1). |
+| **XML retry exhaustion** | After exactly 3 failed attempts, the API degrades gracefully. It returns intact Resident data, with `sources.benefits_register.status` set to `"unavailable"` and `attempts: 3`. |
+| **Benefits Circuit Breaker OPEN** | Following sustained XML failures, the circuit opens. Subsequent requests fail-fast instantly. Returns `status: "unavailable"`, `attempts: 0`, and `error: "Circuit breaker OPEN"`. |
+| **HALF_OPEN recovery** | After the recovery duration (30s), 1 test request is permitted. If it succeeds, the circuit closes. If it fails, it instantly re-opens. |
+| **Both upstreams unavailable** | API returns a clean HTTP 200 with empty data arrays and explicitly marks both sources as `"unavailable"` with complete error logs. |
+| **Partial source failure** | A failure in one source is caught by `return_exceptions=True` and never cancels or crashes the data processing of the healthy source. |
+
+---
+
+## Day-2 Challenge
+
+**Day 1:** Normal upstream operation with occasional latency.
+**Day 2:** The Benefits Register permanently operates at an approximately 40% failure rate.
+
+The unified API manages this gracefully:
+1. **Bounded retries:** A transient failure triggers up to 3 total attempts.
+2. **Linear backoff:** Retries are spaced linearly (`0.3s * attempt`) to avoid hammering a struggling service.
+3. **Failure isolation:** The Resident Index is queried concurrently and remains completely usable even when the Benefits Register is repeatedly failing.
+4. **Graceful degradation:** Exhausted retries result in a partial success response (`resident_index_matches` intact, `benefits_register_matches` empty) rather than a system crash.
+5. **Circuit Breaker:** If the 40% failure rate clusters into a sustained total outage, the Circuit Breaker opens, failing fast to protect the caller from stalling in endless retry loops.
+
+---
+
+## API Response Examples
+
+### GET /health
+```json
+{
+  "status": "healthy",
+  "service": "no-wrong-door"
+}
+```
+
+### GET /search (Normal Success)
 ```json
 {
   "data": {
@@ -174,52 +289,69 @@ Example response:
 }
 ```
 
-Interactive OpenAPI documentation is available at: http://127.0.0.1:8000/docs
-
----
-
-## Running Tests
-
-Run the complete test suite:
-
-```bash
-python -m pytest tests/ -v
+### GET /search (Graceful Degradation - XML Exhausted/OPEN)
+```json
+{
+  "data": {
+    "query": {
+      "first_name": null,
+      "last_name": "Delgado",
+      "date_of_birth": null
+    },
+    "resident_index_matches": [
+      {
+        "id": "R-10234",
+        "first_name": "Maria",
+        "last_name": "Delgado",
+        "date_of_birth": "1971-04-02",
+        "address_line": "118 Cedar Ave",
+        "city": "Northgate",
+        "phone": "555-402-9911",
+        "program_status": "Active",
+        "last_contact": "2025-11-30"
+      }
+    ],
+    "benefits_register_matches": []
+  },
+  "sources": {
+    "resident_index": {
+      "status": "ok",
+      "records_fetched": 661,
+      "duplicates_removed": 41,
+      "error": null,
+      "attempts": 1
+    },
+    "benefits_register": {
+      "status": "unavailable",
+      "records_fetched": 0,
+      "duplicates_removed": null,
+      "error": "Circuit breaker OPEN: Rejecting request to XML service.",
+      "attempts": 0
+    }
+  }
+}
 ```
 
 ---
 
-## Day-2 Change (40% XML Failure Rate)
+## Test Suite
 
-**Day 1:** Normal upstream operation with occasional latency.
-**Day 2:** The Benefits Register permanently operates at an approximately 40% failure rate.
+The project enforces reliability via **23 automated tests**.
 
-Restart the Benefits Register with the increased failure rate to test this:
-```bash
-python services/xml_service.py --port 8082 --failure-rate 0.40
-```
-
-The unified API is architected to handle this automatically without crashing or stalling. Here is exactly how the system responds:
-
-1. A single request reaches both upstream sources concurrently.
-2. A transient Benefits Register failure triggers bounded retries (up to 3 total attempts) with linear backoff.
-3. A successful retry recovers normally and seamlessly returns all data.
-4. Exhausted failures gracefully produce an explicit `unavailable` status in the response metadata.
-5. Resident Index data is fully isolated and is still returned even if the XML service fails completely.
-6. Repeated sustained Benefits Register failures eventually open the Circuit Breaker.
-7. An OPEN circuit fails fast instead of repeatedly hitting the failing service, protecting the caller from stalling.
-8. After the recovery duration (`CB_RECOVERY_DURATION`), a HALF_OPEN state permits exactly one trial request.
-9. A successful trial instantly closes the circuit and resumes normal operations.
-10. A failed trial immediately returns the circuit to OPEN.
-
-**Production logging** surfaces all exact failure points and circuit state transitions for observability.
+| Test File | Coverage |
+|:--|:--|
+| `test_health.py` | Liveness endpoint HTTP 200 responses and healthy contract validation. |
+| `test_circuit_breaker.py` | Unit and integration validation of exact state transitions (`CLOSED` → `OPEN` → `HALF_OPEN`), fast-fail enforcement, and retry threshold limits. |
+| `test_orchestrator.py` | End-to-end integration proving concurrent data assembly, pagination, deterministic deduplication filtering, PascalCase parsing, and guaranteed graceful degradation under single or dual failure modes. |
+| `test_config.py` | Startup validation ensuring environment variables strictly reject negative timeouts or invalid attempt boundaries. |
 
 ---
 
 ## Configuration
 
-All settings can be overridden via environment variables:
+All configuration is centralized in `app/config.py` and strictly validated at startup.
 
-| Variable | Default | Description |
+| Variable | Default | Purpose |
 |:--|:--|:--|
 | `REST_BASE_URL` | `http://127.0.0.1:8081` | Resident Index base URL |
 | `XML_BASE_URL` | `http://127.0.0.1:8082` | Benefits Register base URL |
